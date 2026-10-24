@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Local database & config
+rerentals.db
+test_*.db
+config.json
+
+# Environment / IDE
+.env
+.venv
+venv/
+.idea/
+.vscode/
