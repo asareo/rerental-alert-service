@@ -121,23 +121,51 @@ class TelegramAIBot:
             self._send_telegram_reply(chat_id, filter_updated)
             return
 
-        # Extract search keywords and query the database
+        # 1. Extract borough (including neighborhood-to-borough mapping like Harlem -> Manhattan)
         borough = None
+        neighborhood_map = {
+            "harlem": "Manhattan", "morningside": "Manhattan", "washington heights": "Manhattan",
+            "inwood": "Manhattan", "chelsea": "Manhattan", "east village": "Manhattan",
+            "les": "Manhattan", "midtown": "Manhattan", "ues": "Manhattan", "uws": "Manhattan",
+            "williamsburg": "Brooklyn", "bushwick": "Brooklyn", "bed-stuy": "Brooklyn",
+            "crown heights": "Brooklyn", "greenpoint": "Brooklyn", "flatbush": "Brooklyn",
+            "astoria": "Queens", "lic": "Queens", "long island city": "Queens", "flushing": "Queens",
+            "ridgewood": "Queens", "sunnyside": "Queens", "woodside": "Queens", "jackson heights": "Queens",
+            "mott haven": "Bronx", "concourse": "Bronx", "fordham": "Bronx", "highbridge": "Bronx"
+        }
+
+        user_lower = user_text.lower()
         for b in ["manhattan", "brooklyn", "queens", "bronx", "staten island"]:
-            if b in user_text.lower():
+            if b in user_lower:
                 borough = b.title()
                 break
 
+        if not borough:
+            for hood, b_name in neighborhood_map.items():
+                if hood in user_lower:
+                    borough = b_name
+                    break
+
+        # 2. Extract specific neighborhood/keyword search
+        query_words = []
+        for word in ["harlem", "williamsburg", "bushwick", "astoria", "flushing", "fordham", "bed-stuy", "crown heights", "chelsea", "inwood", "heights"]:
+            if word in user_lower:
+                query_words.append(word)
+
+        search_query = " ".join(query_words) if query_words else None
+
+        # 3. Extract bedroom count
         beds = None
-        if "studio" in user_text.lower():
+        if "studio" in user_lower:
             beds = "Studio"
-        elif "1br" in user_text.lower() or "1 bed" in user_text.lower() or "one bed" in user_text.lower():
+        elif "1br" in user_lower or "1 bed" in user_lower or "one bed" in user_lower:
             beds = "1BR"
-        elif "2br" in user_text.lower() or "2 bed" in user_text.lower() or "two bed" in user_text.lower():
+        elif "2br" in user_lower or "2 bed" in user_lower or "two bed" in user_lower:
             beds = "2BR"
-        elif "3br" in user_text.lower() or "3 bed" in user_text.lower() or "three bed" in user_text.lower():
+        elif "3br" in user_lower or "3 bed" in user_lower or "three bed" in user_lower:
             beds = "3BR"
 
+        # 4. Extract max rent
         max_rent = None
         m_rent = re.search(r'\$?(\d{1,2}(?:,\d{3})|\d{4})\b', user_text)
         if m_rent:
@@ -147,7 +175,7 @@ class TelegramAIBot:
                 pass
 
         # Check if user asked about lotteries
-        wants_lottery = any(w in user_text.lower() for w in ["lottery", "lotteries", "housing connect"])
+        wants_lottery = any(w in user_lower for w in ["lottery", "lotteries", "housing connect"])
 
         listings_context = []
         if wants_lottery:
@@ -157,7 +185,17 @@ class TelegramAIBot:
                     f"LOTTERY: {l['name']} | Borough: {l['borough']} | Units: {l['total_units']} | Deadline: {l['deadline']} | Apply: {l['apply_url']}"
                 )
         else:
-            db_results = self.db.search_listings(borough=borough, max_rent=max_rent, beds=beds, limit=8)
+            # First attempt: search with specific neighborhood query or borough
+            db_results = self.db.search_listings(borough=borough, max_rent=max_rent, beds=beds, query=search_query, limit=8)
+            
+            # If search query was too strict (e.g. West Harlem), fallback to borough and nearby matches
+            if not db_results and (search_query or borough):
+                db_results = self.db.search_listings(borough=borough, max_rent=max_rent, beds=beds, limit=8)
+
+            # If still empty and beds filter was applied, search for unconfirmed apartments fitting the rent
+            if not db_results and beds == "2BR":
+                db_results = self.db.search_listings(borough=borough, max_rent=max_rent, limit=6)
+
             for r in db_results:
                 rent_s = f"${r['rent']:,.0f}/mo" if r['rent'] else "Rent unlisted"
                 clean_addr = re.sub(r'#\w+|apt\.?\s*\w+', '', r['address'], flags=re.IGNORECASE).strip()
@@ -169,9 +207,10 @@ class TelegramAIBot:
         # Formulate prompt for Gemini
         system_instruction = (
             f"You are a friendly, expert NYC Housing & Re-Rental Assistant chatting with {user_name} on Telegram. "
-            "Respond in clear, formatted HTML (use <b>bold</b>, bullet points, emoji). "
-            "Always include direct application links (<a href='...'>Apply</a>) and StreetEasy links. "
-            "Keep the response concise, punchy, and helpful."
+            "IMPORTANT: Respond in clear, readable text. Use standard Markdown like *bold* or bullet points. "
+            "NEVER cut off mid-sentence. "
+            "If direct matches are found in the database, list each unit with its address, rent, bedroom count, and direct link. "
+            "If no exact match is found for a hyper-local neighborhood, state that clearly and present the closest units in that borough!"
         )
 
         db_text = "\n".join(listings_context) if listings_context else "No direct matches found in current catalog."
@@ -179,17 +218,20 @@ class TelegramAIBot:
         gemini_prompt = (
             f"{system_instruction}\n\n"
             f"User asked: \"{user_text}\"\n\n"
-            f"Current listings matching database query:\n{db_text}\n\n"
-            "Formulate the best Telegram response for the user:"
+            f"Database search results:\n{db_text}\n\n"
+            "Formulate a complete, helpful, and concise response:"
         )
 
         reply_text = self._call_gemini(gemini_prompt)
-        if not reply_text:
-            # Fallback if Gemini is unreachable
+        if not reply_text or len(reply_text.strip()) < 15:
+            # Direct formatting fallback if Gemini response is too short or empty
             if listings_context:
-                reply_text = f"Found {len(listings_context)} matching units for you:\n\n" + "\n\n".join(listings_context[:4])
+                items_text = []
+                for item in listings_context[:4]:
+                    items_text.append(f"• {item.replace('RE-RENTAL: ', '')}")
+                reply_text = f"Hey {user_name}! 👋 Here are available re-rental units matching your search:\n\n" + "\n\n".join(items_text)
             else:
-                reply_text = "I checked our live database but didn't find units matching those exact criteria. Try broadening your rent or borough search!"
+                reply_text = f"Hey {user_name}! 👋 I checked our live database but didn't find active 2BR units in that specific pocket right now. Try expanding your search or checking all of Manhattan/Bronx!"
 
         self._send_telegram_reply(chat_id, reply_text)
 
