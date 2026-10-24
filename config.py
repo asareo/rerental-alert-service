@@ -14,6 +14,11 @@ EXAMPLE_CONFIG_FILE = Path(__file__).parent / "config.example.json"
 DEFAULT_CONFIG: Dict[str, Any] = {
     "poll_interval_seconds": 60,
     "baseline_on_first_run": True,
+    "gemini_api_key": "",
+    "housing_lotteries": {
+        "enabled": True,
+        "poll_interval_hours": 3
+    },
     "telegram": {
         "enabled": False,
         "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
@@ -27,13 +32,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "use_ssl": False,
         "sender_email": "YOUR_EMAIL@gmail.com",
         "sender_password": "YOUR_APP_PASSWORD",
-        "recipient_email": "YOUR_EMAIL@gmail.com"
+        "recipient_email": "YOUR_EMAIL@gmail.com",
+        "resend_api_key": ""
     },
     "filters": {
         "max_rent": None,
         "min_rent": None,
         "allowed_beds": [],
         "allowed_boroughs": [],
+        "include_unspecified_beds": True,
         "keywords": []
     }
 }
@@ -59,6 +66,11 @@ def load_config() -> Dict[str, Any]:
             config = DEFAULT_CONFIG.copy()
 
     # Environment variable overrides (useful for Render/Cloud deployment)
+    if os.environ.get("GEMINI_API_KEY"):
+        config["gemini_api_key"] = os.environ["GEMINI_API_KEY"]
+    if os.environ.get("INCLUDE_UNSPECIFIED_BEDS"):
+        config["filters"]["include_unspecified_beds"] = os.environ["INCLUDE_UNSPECIFIED_BEDS"].lower() in ("true", "1", "yes")
+
     if os.environ.get("TELEGRAM_BOT_TOKEN"):
         config["telegram"]["bot_token"] = os.environ["TELEGRAM_BOT_TOKEN"]
         config["telegram"]["enabled"] = True

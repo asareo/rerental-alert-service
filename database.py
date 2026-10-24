@@ -56,6 +56,18 @@ class Database:
                 )
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS seen_lotteries (
+                    lottery_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    borough TEXT,
+                    deadline TEXT,
+                    total_units INTEGER,
+                    apply_url TEXT,
+                    raw_json TEXT,
+                    first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS system_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT,
@@ -149,16 +161,72 @@ class Database:
             """, (limit,))
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_recent_alerts(self, limit: int = 30) -> List[Dict[str, Any]]:
-        """Return recent notifications history."""
+    def is_lottery_seen(self, lottery_id: str) -> bool:
+        """Check if a lottery ID has already been recorded."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM seen_lotteries WHERE lottery_id = ?", (str(lottery_id),))
+            return cursor.fetchone() is not None
+
+    def mark_lottery_seen(self, lottery):
+        """Save a new lottery to seen_lotteries."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            raw_data = json.dumps(getattr(lottery, 'raw_data', {}) or {})
+            cursor.execute("""
+                INSERT OR IGNORE INTO seen_lotteries 
+                (lottery_id, name, borough, deadline, total_units, apply_url, raw_json, first_seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                str(lottery.lottery_id),
+                lottery.name,
+                lottery.borough,
+                lottery.deadline,
+                lottery.total_units,
+                lottery.apply_url,
+                raw_data
+            ))
+            conn.commit()
+
+    def get_active_lotteries(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Return the most recently discovered housing lotteries."""
         with self._connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT n.id, n.listing_id, n.channel, n.status, n.error_message, n.sent_at,
-                       s.address, s.rent, s.beds
-                FROM notifications_sent n
-                LEFT JOIN seen_listings s ON n.listing_id = s.id
-                ORDER BY n.sent_at DESC
+                SELECT lottery_id, name, borough, deadline, total_units, apply_url, first_seen_at
+                FROM seen_lotteries
+                ORDER BY first_seen_at DESC
                 LIMIT ?
             """, (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def search_listings(self, borough: Optional[str] = None, max_rent: Optional[float] = None,
+                        beds: Optional[str] = None, query: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """Query re-rental listings dynamically for the AI assistant."""
+        with self._connection() as conn:
+            cursor = conn.cursor()
+            sql = "SELECT id, source, address, rent, beds, borough, apply_url, first_seen_at FROM seen_listings WHERE 1=1"
+            params = []
+
+            if borough:
+                sql += " AND (LOWER(borough) LIKE ? OR LOWER(address) LIKE ?)"
+                params.extend([f"%{borough.lower()}%", f"%{borough.lower()}%"])
+
+            if max_rent and max_rent > 0:
+                sql += " AND (rent IS NULL OR rent <= ?)"
+                params.append(float(max_rent))
+
+            if beds:
+                beds_clean = beds.lower().replace("bedroom", "br").strip()
+                sql += " AND (LOWER(beds) LIKE ? OR LOWER(beds) = 'apartment' OR beds IS NULL)"
+                params.append(f"%{beds_clean}%")
+
+            if query:
+                sql += " AND (LOWER(address) LIKE ? OR LOWER(source) LIKE ?)"
+                params.extend([f"%{query.lower()}%", f"%{query.lower()}%"])
+
+            sql += " ORDER BY first_seen_at DESC LIMIT ?"
+            params.append(limit)
+
+            cursor.execute(sql, params)
             return [dict(row) for row in cursor.fetchall()]
