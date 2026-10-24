@@ -23,7 +23,7 @@ class EmailNotifier:
         self.enabled = config.get("enabled", False)
         # Resend Cloud API settings
         self.resend_api_key = config.get("resend_api_key", "").strip()
-        self.resend_from = config.get("resend_from", "NYC Re-Rentals <onboarding@resend.dev>").strip()
+        self.resend_from = config.get("resend_from", "onboarding@resend.dev").strip()
 
         # SMTP settings (fallback)
         self.smtp_host = config.get("smtp_host", "smtp.gmail.com").strip()
@@ -123,7 +123,7 @@ class EmailNotifier:
             headers={
                 "Authorization": f"Bearer {self.resend_api_key}",
                 "Content-Type": "application/json",
-                "User-Agent": "ReRentalAlertService/1.0"
+                "User-Agent": "curl/7.88.1"
             }
         )
 
