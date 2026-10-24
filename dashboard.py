@@ -431,10 +431,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
 
-def run_dashboard(port: int = 5050):
-    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
+def run_dashboard(port: int = 5050, run_background_monitor: bool = True):
+    # If run_background_monitor is True, spin up the ReRentalService polling loop
+    # in a background daemon thread so alerts run continuously!
+    if run_background_monitor:
+        def monitor_worker():
+            try:
+                cfg = load_config()
+                svc = ReRentalService(cfg)
+                svc.start_loop()
+            except Exception as e:
+                logger.error(f"[Dashboard Background Monitor] Error: {e}", exc_info=True)
+
+        t = threading.Thread(target=monitor_worker, daemon=True)
+        t.start()
+        logger.info("[Dashboard] Background monitoring loop started.")
+
+    # Bind to 0.0.0.0 so Render and cloud hosts can route incoming web requests
+    server = HTTPServer(("0.0.0.0", port), DashboardHandler)
     print(f"\n==================================================")
     print(f"  🏢 ReRental Alert Service Dashboard is Live!")
-    print(f"  Open in your browser: http://localhost:{port}")
+    print(f"  Listening on port {port}")
     print(f"==================================================\n")
     server.serve_forever()
