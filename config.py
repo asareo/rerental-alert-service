@@ -67,12 +67,16 @@ def load_config() -> Dict[str, Any]:
         config["telegram"]["chat_ids"] = [c.strip() for c in raw_chats.split(",") if c.strip()]
         config["telegram"]["enabled"] = True
 
+    if os.environ.get("RESEND_API_KEY"):
+        config["email"]["resend_api_key"] = os.environ["RESEND_API_KEY"]
+        config["email"]["enabled"] = True
+    if os.environ.get("EMAIL_RECIPIENT"):
+        config["email"]["recipient_email"] = os.environ["EMAIL_RECIPIENT"]
+        config["email"]["enabled"] = True
     if os.environ.get("EMAIL_SENDER"):
         config["email"]["sender_email"] = os.environ["EMAIL_SENDER"]
     if os.environ.get("EMAIL_PASSWORD"):
         config["email"]["sender_password"] = os.environ["EMAIL_PASSWORD"]
-    if os.environ.get("EMAIL_RECIPIENT"):
-        config["email"]["recipient_email"] = os.environ["EMAIL_RECIPIENT"]
     if os.environ.get("EMAIL_ENABLED"):
         config["email"]["enabled"] = os.environ["EMAIL_ENABLED"].lower() in ("true", "1", "yes")
 

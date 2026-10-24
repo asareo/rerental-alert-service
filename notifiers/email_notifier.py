@@ -1,14 +1,18 @@
 """
 notifiers/email_notifier.py
-Sends instant HTML & plain-text email alerts via standard SMTP (Gmail, Outlook, iCloud, etc.).
-Zero third-party library dependencies (uses Python standard library smtplib).
+Sends instant HTML & plain-text email alerts via:
+1. Resend API (Zero-password cloud delivery - Recommended)
+2. Standard SMTP (Gmail, Outlook, iCloud, etc.)
+Zero third-party library dependencies (uses Python standard library urllib & smtplib).
 """
 
 import smtplib
+import urllib.request
+import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import logging
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List
 from models import Listing
 
 logger = logging.getLogger(__name__)
@@ -17,20 +21,38 @@ logger = logging.getLogger(__name__)
 class EmailNotifier:
     def __init__(self, config: Dict[str, Any]):
         self.enabled = config.get("enabled", False)
+        # Resend Cloud API settings
+        self.resend_api_key = config.get("resend_api_key", "").strip()
+        self.resend_from = config.get("resend_from", "NYC Re-Rentals <onboarding@resend.dev>").strip()
+
+        # SMTP settings (fallback)
         self.smtp_host = config.get("smtp_host", "smtp.gmail.com").strip()
         self.smtp_port = int(config.get("smtp_port", 587))
         self.use_tls = config.get("use_tls", True)
         self.use_ssl = config.get("use_ssl", False)
         self.sender_email = config.get("sender_email", "").strip()
         self.sender_password = config.get("sender_password", "").strip()
-        self.recipient_email = config.get("recipient_email", "").strip()
+
+        # Recipients (supports single string or list of emails)
+        raw_recipients = config.get("recipient_emails") or config.get("recipient_email") or []
+        if isinstance(raw_recipients, str):
+            self.recipients = [e.strip() for e in raw_recipients.split(",") if e.strip()]
+        elif isinstance(raw_recipients, list):
+            self.recipients = [str(e).strip() for e in raw_recipients if str(e).strip()]
+        else:
+            self.recipients = []
 
     def is_configured(self) -> bool:
-        """Check if email settings are populated."""
+        """Check if either Resend API or SMTP is configured."""
+        if not self.recipients:
+            return False
+        # Resend API check
+        if self.resend_api_key and self.resend_api_key != "YOUR_RESEND_API_KEY":
+            return True
+        # SMTP check
         return bool(
             self.sender_email
             and self.sender_password
-            and self.recipient_email
             and self.sender_email != "YOUR_EMAIL@gmail.com"
             and self.sender_password != "YOUR_APP_PASSWORD"
         )
@@ -40,7 +62,7 @@ class EmailNotifier:
         if not self.enabled:
             return False, "Email notifier is disabled in configuration."
         if not self.is_configured():
-            return False, "Email SMTP settings are not fully configured."
+            return False, "Email settings are not configured. Set resend_api_key or SMTP settings."
 
         # Format Subject Line
         rent_display = f"${listing.rent:,.0f}/mo" if listing.rent else (listing.rent_str or "")
@@ -51,12 +73,17 @@ class EmailNotifier:
         html_body = listing.to_email_html()
         text_body = listing.to_plain_text()
 
-        return self._send_email(subject, html_body, text_body)
+        # If Resend API key is present, use Resend API directly (zero password!)
+        if self.resend_api_key and self.resend_api_key != "YOUR_RESEND_API_KEY":
+            return self._send_via_resend(subject, html_body, text_body)
+
+        # Fallback to SMTP
+        return self._send_email_smtp(subject, html_body, text_body)
 
     def send_test_email(self) -> Tuple[bool, str]:
-        """Send a test email to verify SMTP configuration."""
+        """Send a test email to verify configuration."""
         if not self.is_configured():
-            return False, "Email SMTP configuration is incomplete. Check sender_email, password, and recipient."
+            return False, "Email configuration is incomplete. Check resend_api_key or SMTP settings."
 
         subject = "✅ [ReRental Alert Service] Test Alert Successful!"
         text_body = (
@@ -75,20 +102,57 @@ class EmailNotifier:
             </p>
         </div>
         """
-        return self._send_email(subject, html_body, text_body)
+        if self.resend_api_key and self.resend_api_key != "YOUR_RESEND_API_KEY":
+            return self._send_via_resend(subject, html_body, text_body)
+        return self._send_email_smtp(subject, html_body, text_body)
 
-    def _send_email(self, subject: str, html_content: str, text_content: str) -> Tuple[bool, str]:
+    def _send_via_resend(self, subject: str, html_content: str, text_content: str) -> Tuple[bool, str]:
+        """Send email using Resend REST API (no passwords, works out of the box)."""
+        url = "https://api.resend.com/emails"
+        payload = {
+            "from": self.resend_from,
+            "to": self.recipients,
+            "subject": subject,
+            "html": html_content,
+            "text": text_content
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Authorization": f"Bearer {self.resend_api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "ReRentalAlertService/1.0"
+            }
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                logger.info(f"[EmailNotifier/Resend] Sent successfully to {self.recipients}. ID: {resp_data.get('id')}")
+                return True, f"Email sent via Resend to {', '.join(self.recipients)}"
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            logger.error(f"[EmailNotifier/Resend] HTTP {e.code}: {err_body}")
+            return False, f"Resend API Error {e.code}: {err_body}"
+        except Exception as e:
+            logger.error(f"[EmailNotifier/Resend] Network error: {e}")
+            return False, str(e)
+
+    def _send_email_smtp(self, subject: str, html_content: str, text_content: str) -> Tuple[bool, str]:
+        """Fallback send using standard SMTP."""
+        recip_str = ", ".join(self.recipients)
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = f"NYC Re-Rental Alert <{self.sender_email}>"
-        msg["To"] = self.recipient_email
+        msg["To"] = recip_str
 
         part1 = MIMEText(text_content, "plain", "utf-8")
         part2 = MIMEText(html_content, "html", "utf-8")
         msg.attach(part1)
         msg.attach(part2)
 
-        # Attempt 1: Using configured port/protocol
         err1 = None
         try:
             return self._attempt_smtp_send(
@@ -98,7 +162,6 @@ class EmailNotifier:
             err1 = e
             logger.debug(f"[EmailNotifier] Initial SMTP attempt failed: {e}")
 
-        # Attempt 2: If using Gmail, try alternate port (465 SSL vs 587 STARTTLS)
         if "gmail" in self.smtp_host.lower():
             try:
                 alt_port = 465 if self.smtp_port == 587 else 587
@@ -110,21 +173,7 @@ class EmailNotifier:
             except Exception as e:
                 logger.debug(f"[EmailNotifier] Alternate Gmail attempt failed: {e}")
 
-        # Construct helpful error message
         err_str = str(err1)
-        if "connection unexpectedly closed" in err_str.lower() or "smtpserverdisconnected" in err_str.lower():
-            if "gmail" in self.smtp_host.lower():
-                clean_err = (
-                    "Gmail connection closed by Google.\n"
-                    "👉 Cause: Google DOES NOT allow your standard account password or a placeholder for SMTP.\n"
-                    "👉 Solution: You must create a 16-character Google 'App Password':\n"
-                    "   1. Go to https://myaccount.google.com/apppasswords\n"
-                    "   2. Create a password named 'RentalAlerts'\n"
-                    "   3. Copy the 16-letter code into sender_password in config.json"
-                )
-                logger.error(f"[EmailNotifier] {clean_err}")
-                return False, clean_err
-
         logger.error(f"[EmailNotifier] Failed to send email: {err_str}")
         return False, err_str
 
@@ -141,7 +190,7 @@ class EmailNotifier:
         if self.sender_password:
             server.login(self.sender_email, self.sender_password)
 
-        server.sendmail(self.sender_email, [self.recipient_email], msg.as_string())
+        server.sendmail(self.sender_email, self.recipients, msg.as_string())
         server.quit()
-        logger.info(f"[EmailNotifier] Email successfully sent to {self.recipient_email}")
-        return True, f"Email sent successfully to {self.recipient_email}"
+        logger.info(f"[EmailNotifier] Email successfully sent to {self.recipients}")
+        return True, f"Email sent successfully to {', '.join(self.recipients)}"
